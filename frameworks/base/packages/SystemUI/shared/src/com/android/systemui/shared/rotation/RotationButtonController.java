@@ -23,8 +23,6 @@ import static android.view.Display.DEFAULT_DISPLAY;
 import static com.android.internal.view.RotationPolicy.NATURAL_ROTATION;
 import static com.android.systemui.shared.system.QuickStepContract.isGesturalMode;
 
-import android.media.AudioManager;
-
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ObjectAnimator;
@@ -103,7 +101,6 @@ public class RotationButtonController {
     private boolean mPendingRotationSuggestion;
     private boolean mHoveringRotationSuggestion;
     private final AccessibilityManager mAccessibilityManager;
-    private final AudioManager mAudioManager;
     private final TaskStackListenerImpl mTaskStackListener;
 
     private boolean mListenersRegistered = false;
@@ -114,6 +111,7 @@ public class RotationButtonController {
     int mBehavior = WindowInsetsController.BEHAVIOR_DEFAULT;
     private int mNavBarMode;
     private boolean mTaskBarVisible = false;
+    private boolean mVideoPlaying = false;
     private boolean mSkipOverrideUserLockPrefsOnce;
     private final int mLightIconColor;
     private final int mDarkIconColor;
@@ -142,6 +140,13 @@ public class RotationButtonController {
         @Override
         public void onReceive(Context context, Intent intent) {
             updateDockedState(intent);
+        }
+    };
+
+    private final BroadcastReceiver mVideoReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            updateVideoState(intent);
         }
     };
 
@@ -185,7 +190,6 @@ public class RotationButtonController {
         mIconResId = mIconCcwStart90ResId;
 
         mAccessibilityManager = AccessibilityManager.getInstance(context);
-        mAudioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         mTaskStackListener = new TaskStackListenerImpl();
         mWindowRotationProvider = windowRotationProvider;
 
@@ -241,6 +245,14 @@ public class RotationButtonController {
             mContext.getMainExecutor().execute(() -> updateDockedState(intent));
         });
 
+        mBgExecutor.execute(() -> {
+            IntentFilter filter = new IntentFilter();
+            filter.addAction("ACTION_VIDEO_STARTED");
+            filter.addAction("ACTION_VIDEO_STOPPED");
+            final Intent intent = mContext.registerReceiver(mVideoReceiver, filter, Context.RECEIVER_EXPORTED);
+            mContext.getMainExecutor().execute(() -> updateVideoState(intent));
+        });
+
         if (registerRotationWatcher) {
             try {
                 WindowManagerGlobal.getWindowManagerService()
@@ -270,6 +282,14 @@ public class RotationButtonController {
                 mContext.unregisterReceiver(mDockedReceiver);
             } catch (IllegalArgumentException e) {
                 Log.e(TAG, "Docked receiver already unregistered", e);
+            }
+        });
+
+        mBgExecutor.execute(() -> {
+            try {
+                mContext.unregisterReceiver(mVideoReceiver);
+            } catch (IllegalArgumentException e) {
+                Log.e(TAG, "Video receiver already unregistered", e);
             }
         });
 
@@ -408,6 +428,19 @@ public class RotationButtonController {
                 != Intent.EXTRA_DOCK_STATE_UNDOCKED;
     }
 
+    private void updateVideoState(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+
+        String action = intent.getAction();
+        if (action.equals("ACTION_VIDEO_STARTED")) {
+            mVideoPlaying = true;
+        } else if (action.equals("ACTION_VIDEO_STOPPED")) {
+            mVideoPlaying = false;
+        }
+    }
+
     private void updateRotationButtonStateInOverview() {
         if (mIsRecentsAnimationRunning && !mHomeRotationEnabled) {
             setRotateSuggestionButtonState(false, true /* hideImmediately */);
@@ -446,15 +479,16 @@ public class RotationButtonController {
             return;
         }
 
-        Log.i(TAG, "onRotationProposal() isMusicActive=" + mAudioManager.isMusicActive());
-        if (mAudioManager.isMusicActive()) {
+        // Prepare to show the navbar icon by updating the icon style to change anim params
+        Log.i(TAG, "onRotationProposal(rotation=" + rotation + ")");
+        mLastRotationSuggestion = rotation; // Remember rotation for click
+
+        Log.i(TAG, "onRotationProposal() mVideoPlaying=" + mVideoPlaying);
+        if (mVideoPlaying) {
             setRotationLockedAtAngle(rotation);
             return;
         }
 
-        // Prepare to show the navbar icon by updating the icon style to change anim params
-        Log.i(TAG, "onRotationProposal(rotation=" + rotation + ")");
-        mLastRotationSuggestion = rotation; // Remember rotation for click
         final boolean rotationCCW = Utilities.isRotationAnimationCCW(windowRotation, rotation);
         if (windowRotation == Surface.ROTATION_0 || windowRotation == Surface.ROTATION_180) {
             mIconResId = rotationCCW ? mIconCcwStart0ResId : mIconCwStart0ResId;
