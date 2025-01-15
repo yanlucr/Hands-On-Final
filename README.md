@@ -14,23 +14,22 @@ Bem-vindo ao repositório da Equipe 2 no DevTITANS! Este projeto está focado no
 
 ## Contribuidores
 
-<img src="images/card_alcir.jpg" width="180" >
-<img src="images/card_yan.jpg" width="180" >
-<img src="images/card_odalisio.jpg" width="180" >
-<img src="images/card_pedro.jpg" width="180" >
-<img src="images/card_lucas.jpg" width="180" >
-<img src="images/card_joao.jpg" width="180" >
+<div align="center">
 
+<table>
+  <tr>
+    <td align="center"><img src="images/card_alcir.jpg" width="180" alt="Alcir"><br><b>Alcir Heber Castro Figueiredo</b><br>Responsável pela <i>Rotação de Tela</i></td>
+    <td align="center"><img src="images/card_yan.jpg" width="180" alt="Yan"><br><b>Yan Lucas Cavalcante Rodrigues</b><br>Responsável pela <i>Rotação de Tela</i></td>
+    <td align="center"><img src="images/card_odalisio.jpg" width="180" alt="Odalisio"><br><b>Odalisio Leite da Silva Neto</b><br>Responsável pelo <i>Port para o Motorola G100</i></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="images/card_pedro.jpg" width="180" alt="Pedro"><br><b>Pedro Jorge de Oliveira Sena Junior</b><br>Responsável pela <i>Animação de Carregamento</i></td>
+    <td align="center"><img src="images/card_lucas.jpg" width="180" alt="Lucas"><br><b>Lucas do Nascimento Silva</b><br>Responsável pela <i>Animação de Carregamento</i></td>
+    <td align="center"><img src="images/card_joao.jpg" width="180" alt="João"><br><b>João Pedro Abensur Amoedo</b><br>Responsável pela <i>Animação de Carregamento</i></td>
+  </tr>
+</table>
 
-
-
-
-- **Alcir Heber Castro Figueiredo:** Responsável por {Rotação de Tela}
-- **Yan Lucas Cavalcante Rodrigues:** Responsável por {Rotação de Tela}
-- **Odalisio Leite da Silva Neto:** Responsável por {Port para o Motorola G100}
-- **Pedro Jorge de Oliveira Sena Junior:** Responsável por {Animação de Carregamento}
-- **Lucas do Nascimento Silva:** Responsável por {Animação de Carregamento}
-- **João Pedro Abensur Amoedo:** Responsável por {Animação de Carregamento}
+</div>
 
 ## Recursos
 
