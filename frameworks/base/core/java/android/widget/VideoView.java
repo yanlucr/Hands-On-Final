@@ -798,6 +798,7 @@ public class VideoView extends SurfaceView
             mMediaPlayer.start();
             mCurrentState = STATE_PLAYING;
         }
+        Log.d(TAG, "devtitans-debug VideoView video playing");
         mTargetState = STATE_PLAYING;
         mContext.sendBroadcast(new Intent("ACTION_VIDEO_STARTED"));
     }
@@ -810,6 +811,7 @@ public class VideoView extends SurfaceView
                 mCurrentState = STATE_PAUSED;
             }
         }
+        Log.d(TAG, "devtitans-debug VideoView video stopped");
         mTargetState = STATE_PAUSED;
         mContext.sendBroadcast(new Intent("ACTION_VIDEO_STOPPED"));
     }

@@ -25,7 +25,6 @@ Bem-vindo ao repositório da Equipe 2 no DevTITANS! Este projeto está focado no
   <tr>
     <td align="center"><img src="images/card_pedro.jpg" width="180" alt="Pedro"><br><b>Pedro Jorge de Oliveira Sena Junior</b><br>Responsável pela <i>Animação de Carregamento</i></td>
     <td align="center"><img src="images/card_lucas.jpg" width="180" alt="Lucas"><br><b>Lucas do Nascimento Silva</b><br>Responsável pela <i>Animação de Carregamento</i></td>
-    <td align="center"><img src="images/card_joao.jpg" width="180" alt="João"><br><b>João Pedro Abensur Amoedo</b><br>Responsável pela <i>Animação de Carregamento</i></td>
   </tr>
 </table>
 
