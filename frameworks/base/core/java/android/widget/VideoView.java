@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2006 The Android Open Source Project
+ * Copyright 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,982 +14,762 @@
  * limitations under the License.
  */
 
-package android.widget;
+package com.android.systemui.shared.rotation;
 
-import android.annotation.NonNull;
-import android.app.AlertDialog;
-import android.compat.annotation.UnsupportedAppUsage;
+import static android.content.pm.PackageManager.FEATURE_PC;
+import static android.os.Process.THREAD_PRIORITY_BACKGROUND;
+import static android.view.Display.DEFAULT_DISPLAY;
+
+import static com.android.internal.view.RotationPolicy.NATURAL_ROTATION;
+import static com.android.systemui.shared.system.QuickStepContract.isGesturalMode;
+
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ObjectAnimator;
+import android.annotation.ColorInt;
+import android.annotation.DrawableRes;
+import android.annotation.SuppressLint;
+import android.app.StatusBarManager;
+import android.content.BroadcastReceiver;
+import android.content.ContentResolver;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
-import android.content.res.Resources;
-import android.graphics.Canvas;
-import android.media.AudioAttributes;
-import android.media.AudioManager;
-import android.media.Cea708CaptionRenderer;
-import android.media.ClosedCaptionRenderer;
-import android.media.MediaFormat;
-import android.media.MediaPlayer;
-import android.media.MediaPlayer.OnCompletionListener;
-import android.media.MediaPlayer.OnErrorListener;
-import android.media.MediaPlayer.OnInfoListener;
-import android.media.Metadata;
-import android.media.SubtitleController;
-import android.media.SubtitleTrack.RenderingWidget;
-import android.media.TtmlRenderer;
-import android.media.WebVttRenderer;
-import android.net.Uri;
-import android.os.Build;
+import android.content.IntentFilter;
+import android.graphics.drawable.AnimatedVectorDrawable;
+import android.graphics.drawable.Drawable;
+import android.os.Handler;
+import android.os.HandlerExecutor;
+import android.os.HandlerThread;
 import android.os.Looper;
-import android.util.AttributeSet;
+import android.os.RemoteException;
+import android.os.SystemProperties;
+import android.provider.Settings;
 import android.util.Log;
-import android.util.Pair;
-import android.view.KeyEvent;
+import android.view.HapticFeedbackConstants;
+import android.view.IRotationWatcher;
 import android.view.MotionEvent;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
+import android.view.Surface;
 import android.view.View;
-import android.widget.MediaController.MediaPlayerControl;
+import android.view.WindowInsetsController;
+import android.view.WindowManagerGlobal;
+import android.view.accessibility.AccessibilityManager;
+import android.view.animation.Interpolator;
+import android.view.animation.LinearInterpolator;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.Map;
-import java.util.Vector;
+import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.logging.UiEvent;
+import com.android.internal.logging.UiEventLogger;
+import com.android.internal.logging.UiEventLoggerImpl;
+import com.android.internal.view.RotationPolicy;
+import com.android.systemui.shared.recents.utilities.Utilities;
+import com.android.systemui.shared.recents.utilities.ViewRippler;
+import com.android.systemui.shared.rotation.RotationButton.RotationButtonUpdatesCallback;
+import com.android.systemui.shared.system.ActivityManagerWrapper;
+import com.android.systemui.shared.system.TaskStackChangeListener;
+import com.android.systemui.shared.system.TaskStackChangeListeners;
+
+import java.io.PrintWriter;
+import java.util.Optional;
+import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 
 /**
- * Displays a video file.  The VideoView class
- * can load images from various sources (such as resources or content
- * providers), takes care of computing its measurement from the video so that
- * it can be used in any layout manager, and provides various display options
- * such as scaling and tinting.<p>
- *
- * <em>Note: VideoView does not retain its full state when going into the
- * background.</em>  In particular, it does not restore the current play state,
- * play position, selected tracks, or any subtitle tracks added via
- * {@link #addSubtitleSource addSubtitleSource()}.  Applications should
- * save and restore these on their own in
- * {@link android.app.Activity#onSaveInstanceState} and
- * {@link android.app.Activity#onRestoreInstanceState}.<p>
- * Also note that the audio session id (from {@link #getAudioSessionId}) may
- * change from its previously returned value when the VideoView is restored.
- * <p>
- * By default, VideoView requests audio focus with {@link AudioManager#AUDIOFOCUS_GAIN}. Use
- * {@link #setAudioFocusRequest(int)} to change this behavior.
- * <p>
- * The default {@link AudioAttributes} used during playback have a usage of
- * {@link AudioAttributes#USAGE_MEDIA} and a content type of
- * {@link AudioAttributes#CONTENT_TYPE_MOVIE}, use {@link #setAudioAttributes(AudioAttributes)} to
- * modify them.
+ * Contains logic that deals with showing a rotate suggestion button with animation.
  */
-public class VideoView extends SurfaceView
-        implements MediaPlayerControl, SubtitleController.Anchor {
-    private static final String TAG = "VideoView";
+public class RotationButtonController {
 
-    // all possible internal states
-    private static final int STATE_ERROR = -1;
-    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
-    private static final int STATE_IDLE = 0;
-    private static final int STATE_PREPARING = 1;
-    private static final int STATE_PREPARED = 2;
-    private static final int STATE_PLAYING = 3;
-    private static final int STATE_PAUSED = 4;
-    private static final int STATE_PLAYBACK_COMPLETED = 5;
+    private static final String TAG = "RotationButtonController";
+    private static final int BUTTON_FADE_IN_OUT_DURATION_MS = 100;
+    private static final int NAVBAR_HIDDEN_PENDING_ICON_TIMEOUT_MS = 20000;
+    private static final boolean OEM_DISALLOW_ROTATION_IN_SUW =
+            SystemProperties.getBoolean("ro.setupwizard.rotation_locked", false);
+    private static final Interpolator LINEAR_INTERPOLATOR = new LinearInterpolator();
 
-    private final Vector<Pair<InputStream, MediaFormat>> mPendingSubtitleTracks = new Vector<>();
+    private static final int NUM_ACCEPTED_ROTATION_SUGGESTIONS_FOR_INTRODUCTION = 3;
 
-    // settable by the client
-    @UnsupportedAppUsage
-    private Uri mUri;
-    @UnsupportedAppUsage
-    private Map<String, String> mHeaders;
+    private final Context mContext;
+    private final Handler mMainThreadHandler = new Handler(Looper.getMainLooper());
+    private final UiEventLogger mUiEventLogger = new UiEventLoggerImpl();
+    private final ViewRippler mViewRippler = new ViewRippler();
+    private final Supplier<Integer> mWindowRotationProvider;
+    private RotationButton mRotationButton;
 
-    // mCurrentState is a VideoView object's current state.
-    // mTargetState is the state that a method caller intends to reach.
-    // For instance, regardless the VideoView object's current state,
-    // calling pause() intends to bring the object to a target state
-    // of STATE_PAUSED.
-    @UnsupportedAppUsage
-    private int mCurrentState = STATE_IDLE;
-    @UnsupportedAppUsage
-    private int mTargetState = STATE_IDLE;
+    private boolean mIsRecentsAnimationRunning;
+    private boolean mDocked;
+    private boolean mHomeRotationEnabled;
+    private int mLastRotationSuggestion;
+    private boolean mPendingRotationSuggestion;
+    private boolean mHoveringRotationSuggestion;
+    private final AccessibilityManager mAccessibilityManager;
+    private final TaskStackListenerImpl mTaskStackListener;
 
-    // All the stuff we need for playing and showing a video
-    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
-    private SurfaceHolder mSurfaceHolder = null;
-    @UnsupportedAppUsage
-    private MediaPlayer mMediaPlayer = null;
-    private int mAudioSession;
-    @UnsupportedAppUsage
-    private int mVideoWidth;
-    @UnsupportedAppUsage
-    private int mVideoHeight;
-    private int mSurfaceWidth;
-    private int mSurfaceHeight;
-    @UnsupportedAppUsage
-    private MediaController mMediaController;
-    private OnCompletionListener mOnCompletionListener;
-    private MediaPlayer.OnPreparedListener mOnPreparedListener;
-    @UnsupportedAppUsage
-    private int mCurrentBufferPercentage;
-    private OnErrorListener mOnErrorListener;
-    private OnInfoListener mOnInfoListener;
-    private int mSeekWhenPrepared;  // recording the seek position while preparing
-    private boolean mCanPause;
-    private boolean mCanSeekBack;
-    private boolean mCanSeekForward;
-    private AudioManager mAudioManager;
-    private int mAudioFocusType = AudioManager.AUDIOFOCUS_GAIN; // legacy focus gain
-    private AudioAttributes mAudioAttributes;
+    private boolean mListenersRegistered = false;
+    private boolean mRotationWatcherRegistered = false;
+    private boolean mIsNavigationBarShowing;
+    @SuppressLint("InlinedApi")
+    private @WindowInsetsController.Behavior
+    int mBehavior = WindowInsetsController.BEHAVIOR_DEFAULT;
+    private int mNavBarMode;
+    private boolean mTaskBarVisible = false;
+    private boolean mVideoPlaying = false;
+    private boolean mSkipOverrideUserLockPrefsOnce;
+    private final int mLightIconColor;
+    private final int mDarkIconColor;
 
-    /** Subtitle rendering widget overlaid on top of the video. */
-    private RenderingWidget mSubtitleWidget;
+    @DrawableRes
+    private final int mIconCcwStart0ResId;
+    @DrawableRes
+    private final int mIconCcwStart90ResId;
+    @DrawableRes
+    private final int mIconCwStart0ResId;
+    @DrawableRes
+    private final int mIconCwStart90ResId;
+    /** Defaults to mainExecutor if not set via {@link #setBgExecutor(Executor)}. */
+    private Executor mBgExecutor;
 
-    /** Listener for changes to subtitle data, used to redraw when needed. */
-    private RenderingWidget.OnChangedListener mSubtitlesChangedListener;
+    @DrawableRes
+    private int mIconResId;
 
-    public VideoView(Context context) {
-        this(context, null);
-    }
+    private final Runnable mRemoveRotationProposal =
+            () -> setRotateSuggestionButtonState(false /* visible */);
+    private final Runnable mCancelPendingRotationProposal =
+            () -> mPendingRotationSuggestion = false;
+    private Animator mRotateHideAnimator;
 
-    public VideoView(Context context, AttributeSet attrs) {
-        this(context, attrs, 0);
-    }
-
-    public VideoView(Context context, AttributeSet attrs, int defStyleAttr) {
-        this(context, attrs, defStyleAttr, 0);
-    }
-
-    public VideoView(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
-        super(context, attrs, defStyleAttr, defStyleRes);
-
-        mVideoWidth = 0;
-        mVideoHeight = 0;
-
-        mAudioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
-        mAudioAttributes = new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build();
-
-        getHolder().addCallback(mSHCallback);
-        getHolder().setType(SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS);
-
-        setFocusable(true);
-        setFocusableInTouchMode(true);
-        requestFocus();
-
-        mCurrentState = STATE_IDLE;
-        mTargetState = STATE_IDLE;
-    }
-
-    @Override
-    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        //Log.i("@@@@", "onMeasure(" + MeasureSpec.toString(widthMeasureSpec) + ", "
-        //        + MeasureSpec.toString(heightMeasureSpec) + ")");
-
-        int width = getDefaultSize(mVideoWidth, widthMeasureSpec);
-        int height = getDefaultSize(mVideoHeight, heightMeasureSpec);
-        if (mVideoWidth > 0 && mVideoHeight > 0) {
-
-            int widthSpecMode = MeasureSpec.getMode(widthMeasureSpec);
-            int widthSpecSize = MeasureSpec.getSize(widthMeasureSpec);
-            int heightSpecMode = MeasureSpec.getMode(heightMeasureSpec);
-            int heightSpecSize = MeasureSpec.getSize(heightMeasureSpec);
-
-            if (widthSpecMode == MeasureSpec.EXACTLY && heightSpecMode == MeasureSpec.EXACTLY) {
-                // the size is fixed
-                width = widthSpecSize;
-                height = heightSpecSize;
-
-                // for compatibility, we adjust size based on aspect ratio
-                if ( mVideoWidth * height  < width * mVideoHeight ) {
-                    //Log.i("@@@", "image too wide, correcting");
-                    width = height * mVideoWidth / mVideoHeight;
-                } else if ( mVideoWidth * height  > width * mVideoHeight ) {
-                    //Log.i("@@@", "image too tall, correcting");
-                    height = width * mVideoHeight / mVideoWidth;
-                }
-            } else if (widthSpecMode == MeasureSpec.EXACTLY) {
-                // only the width is fixed, adjust the height to match aspect ratio if possible
-                width = widthSpecSize;
-                height = width * mVideoHeight / mVideoWidth;
-                if (heightSpecMode == MeasureSpec.AT_MOST && height > heightSpecSize) {
-                    // couldn't match aspect ratio within the constraints
-                    height = heightSpecSize;
-                }
-            } else if (heightSpecMode == MeasureSpec.EXACTLY) {
-                // only the height is fixed, adjust the width to match aspect ratio if possible
-                height = heightSpecSize;
-                width = height * mVideoWidth / mVideoHeight;
-                if (widthSpecMode == MeasureSpec.AT_MOST && width > widthSpecSize) {
-                    // couldn't match aspect ratio within the constraints
-                    width = widthSpecSize;
-                }
-            } else {
-                // neither the width nor the height are fixed, try to use actual video size
-                width = mVideoWidth;
-                height = mVideoHeight;
-                if (heightSpecMode == MeasureSpec.AT_MOST && height > heightSpecSize) {
-                    // too tall, decrease both width and height
-                    height = heightSpecSize;
-                    width = height * mVideoWidth / mVideoHeight;
-                }
-                if (widthSpecMode == MeasureSpec.AT_MOST && width > widthSpecSize) {
-                    // too wide, decrease both width and height
-                    width = widthSpecSize;
-                    height = width * mVideoHeight / mVideoWidth;
-                }
-            }
-        } else {
-            // no size yet, just adopt the given spec sizes
+    private final BroadcastReceiver mDockedReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            updateDockedState(intent);
         }
-        setMeasuredDimension(width, height);
-    }
+    };
 
-    @Override
-    public CharSequence getAccessibilityClassName() {
-        return VideoView.class.getName();
-    }
-
-    public int resolveAdjustedSize(int desiredSize, int measureSpec) {
-        return getDefaultSize(desiredSize, measureSpec);
-    }
-
-    /**
-     * Sets video path.
-     *
-     * @param path the path of the video.
-     */
-    public void setVideoPath(String path) {
-        setVideoURI(Uri.parse(path));
-    }
-
-    /**
-     * Sets video URI.
-     *
-     * @param uri the URI of the video.
-     */
-    public void setVideoURI(Uri uri) {
-        setVideoURI(uri, null);
-    }
-
-    /**
-     * Sets video URI using specific headers.
-     *
-     * @param uri     the URI of the video.
-     * @param headers the headers for the URI request.
-     *                Note that the cross domain redirection is allowed by default, but that can be
-     *                changed with key/value pairs through the headers parameter with
-     *                "android-allow-cross-domain-redirect" as the key and "0" or "1" as the value
-     *                to disallow or allow cross domain redirection.
-     */
-    public void setVideoURI(Uri uri, Map<String, String> headers) {
-        mUri = uri;
-        mHeaders = headers;
-        mSeekWhenPrepared = 0;
-        openVideo();
-        requestLayout();
-        invalidate();
-    }
-
-    /**
-     * Sets which type of audio focus will be requested during the playback, or configures playback
-     * to not request audio focus. Valid values for focus requests are
-     * {@link AudioManager#AUDIOFOCUS_GAIN}, {@link AudioManager#AUDIOFOCUS_GAIN_TRANSIENT},
-     * {@link AudioManager#AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK}, and
-     * {@link AudioManager#AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE}. Or use
-     * {@link AudioManager#AUDIOFOCUS_NONE} to express that audio focus should not be
-     * requested when playback starts. You can for instance use this when playing a silent animation
-     * through this class, and you don't want to affect other audio applications playing in the
-     * background.
-     * @param focusGain the type of audio focus gain that will be requested, or
-     *    {@link AudioManager#AUDIOFOCUS_NONE} to disable the use audio focus during playback.
-     */
-    public void setAudioFocusRequest(int focusGain) {
-        if (focusGain != AudioManager.AUDIOFOCUS_NONE
-                && focusGain != AudioManager.AUDIOFOCUS_GAIN
-                && focusGain != AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-                && focusGain != AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-                && focusGain != AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE) {
-            throw new IllegalArgumentException("Illegal audio focus type " + focusGain);
+    private final BroadcastReceiver mVideoReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            updateVideoState(intent);
         }
-        mAudioFocusType = focusGain;
-    }
+    };
 
-    /**
-     * Sets the {@link AudioAttributes} to be used during the playback of the video.
-     * @param attributes non-null <code>AudioAttributes</code>.
-     */
-    public void setAudioAttributes(@NonNull AudioAttributes attributes) {
-        if (attributes == null) {
-            throw new IllegalArgumentException("Illegal null AudioAttributes");
+    private final IRotationWatcher.Stub mRotationWatcher = new IRotationWatcher.Stub() {
+        @Override
+        public void onRotationChanged(final int rotation) {
+            // We need this to be scheduled as early as possible to beat the redrawing of
+            // window in response to the orientation change.
+            mMainThreadHandler.postAtFrontOfQueue(() -> {
+                onRotationWatcherChanged(rotation);
+            });
         }
-        mAudioAttributes = attributes;
+    };
+
+    /**
+     * Determines if rotation suggestions disabled2 flag exists in flag
+     *
+     * @param disable2Flags see if rotation suggestion flag exists in this flag
+     * @return whether flag exists
+     */
+    public static boolean hasDisable2RotateSuggestionFlag(int disable2Flags) {
+        return (disable2Flags & StatusBarManager.DISABLE2_ROTATE_SUGGESTIONS) != 0;
+    }
+
+    public RotationButtonController(Context context,
+        @ColorInt int lightIconColor, @ColorInt int darkIconColor,
+        @DrawableRes int iconCcwStart0ResId,
+        @DrawableRes int iconCcwStart90ResId,
+        @DrawableRes int iconCwStart0ResId,
+        @DrawableRes int iconCwStart90ResId,
+        Supplier<Integer> windowRotationProvider) {
+
+        mContext = context;
+        mLightIconColor = lightIconColor;
+        mDarkIconColor = darkIconColor;
+
+        mIconCcwStart0ResId = iconCcwStart0ResId;
+        mIconCcwStart90ResId = iconCcwStart90ResId;
+        mIconCwStart0ResId = iconCwStart0ResId;
+        mIconCwStart90ResId = iconCwStart90ResId;
+        mIconResId = mIconCcwStart90ResId;
+
+        mAccessibilityManager = AccessibilityManager.getInstance(context);
+        mTaskStackListener = new TaskStackListenerImpl();
+        mWindowRotationProvider = windowRotationProvider;
+
+        mBgExecutor = context.getMainExecutor();
+    }
+
+    public void setRotationButton(RotationButton rotationButton,
+                                  RotationButtonUpdatesCallback updatesCallback) {
+        mRotationButton = rotationButton;
+        mRotationButton.setRotationButtonController(this);
+        mRotationButton.setOnClickListener(this::onRotateSuggestionClick);
+        mRotationButton.setOnHoverListener(this::onRotateSuggestionHover);
+        mRotationButton.setUpdatesCallback(updatesCallback);
+    }
+
+    public Context getContext() {
+        return mContext;
+    }
+
+    public void setBgExecutor(Executor bgExecutor) {
+        mBgExecutor = bgExecutor;
     }
 
     /**
-     * Adds an external subtitle source file (from the provided input stream.)
-     *
-     * Note that a single external subtitle source may contain multiple or no
-     * supported tracks in it. If the source contained at least one track in
-     * it, one will receive an {@link MediaPlayer#MEDIA_INFO_METADATA_UPDATE}
-     * info message. Otherwise, if reading the source takes excessive time,
-     * one will receive a {@link MediaPlayer#MEDIA_INFO_SUBTITLE_TIMED_OUT}
-     * message. If the source contained no supported track (including an empty
-     * source file or null input stream), one will receive a {@link
-     * MediaPlayer#MEDIA_INFO_UNSUPPORTED_SUBTITLE} message. One can find the
-     * total number of available tracks using {@link MediaPlayer#getTrackInfo()}
-     * to see what additional tracks become available after this method call.
-     *
-     * @param is     input stream containing the subtitle data.  It will be
-     *               closed by the media framework.
-     * @param format the format of the subtitle track(s).  Must contain at least
-     *               the mime type ({@link MediaFormat#KEY_MIME}) and the
-     *               language ({@link MediaFormat#KEY_LANGUAGE}) of the file.
-     *               If the file itself contains the language information,
-     *               specify "und" for the language.
+     * Called during Taskbar initialization.
      */
-    public void addSubtitleSource(InputStream is, MediaFormat format) {
-        if (mMediaPlayer == null) {
-            mPendingSubtitleTracks.add(Pair.create(is, format));
-        } else {
+    public void init() {
+        registerListeners(true /* registerRotationWatcher */);
+        if (mContext.getDisplay().getDisplayId() != DEFAULT_DISPLAY) {
+            // Currently there is no accelerometer sensor on non-default display, disable fixed
+            // rotation for non-default display
+            onDisable2FlagChanged(StatusBarManager.DISABLE2_ROTATE_SUGGESTIONS);
+        }
+    }
+
+    /**
+     * Called during Taskbar uninitialization.
+     */
+    public void onDestroy() {
+        unregisterListeners();
+    }
+
+    public void registerListeners(boolean registerRotationWatcher) {
+        if (mListenersRegistered || getContext().getPackageManager().hasSystemFeature(FEATURE_PC)) {
+            return;
+        }
+
+        mListenersRegistered = true;
+
+        mBgExecutor.execute(() -> {
+            final Intent intent = mContext.registerReceiver(mDockedReceiver,
+                    new IntentFilter(Intent.ACTION_DOCK_EVENT));
+            mContext.getMainExecutor().execute(() -> updateDockedState(intent));
+        });
+
+        mBgExecutor.execute(() -> {
+            IntentFilter filter = new IntentFilter();
+            filter.addAction("ACTION_VIDEO_STARTED");
+            filter.addAction("ACTION_VIDEO_STOPPED");
+            final Intent intent = mContext.registerReceiver(mVideoReceiver, filter, Context.RECEIVER_EXPORTED);
+            mContext.getMainExecutor().execute(() -> updateVideoState(intent));
+        });
+
+        if (registerRotationWatcher) {
             try {
-                mMediaPlayer.addSubtitleSource(is, format);
-            } catch (IllegalStateException e) {
-                mInfoListener.onInfo(
-                        mMediaPlayer, MediaPlayer.MEDIA_INFO_UNSUPPORTED_SUBTITLE, 0);
+                WindowManagerGlobal.getWindowManagerService()
+                        .watchRotation(mRotationWatcher, DEFAULT_DISPLAY);
+                mRotationWatcherRegistered = true;
+            } catch (IllegalArgumentException e) {
+                mListenersRegistered = false;
+                Log.w(TAG, "RegisterListeners for the display failed", e);
+            } catch (RemoteException e) {
+                Log.e(TAG, "RegisterListeners caught a RemoteException", e);
+                return;
             }
         }
+
+        TaskStackChangeListeners.getInstance().registerTaskStackListener(mTaskStackListener);
     }
 
-    public void stopPlayback() {
-        if (mMediaPlayer != null) {
-            mMediaPlayer.stop();
-            mMediaPlayer.release();
-            mMediaPlayer = null;
-            mCurrentState = STATE_IDLE;
-            mTargetState  = STATE_IDLE;
-            mAudioManager.abandonAudioFocus(null);
-        }
-    }
-
-    private void openVideo() {
-        if (mUri == null || mSurfaceHolder == null) {
-            // not ready for playback just yet, will try again later
+    public void unregisterListeners() {
+        if (!mListenersRegistered) {
             return;
         }
-        // we shouldn't clear the target state, because somebody might have
-        // called start() previously
-        release(false);
 
-        if (mAudioFocusType != AudioManager.AUDIOFOCUS_NONE) {
-            // TODO this should have a focus listener
-            mAudioManager.requestAudioFocus(null, mAudioAttributes, mAudioFocusType, 0 /*flags*/);
+        mListenersRegistered = false;
+
+        mBgExecutor.execute(() -> {
+            try {
+                mContext.unregisterReceiver(mDockedReceiver);
+            } catch (IllegalArgumentException e) {
+                Log.e(TAG, "Docked receiver already unregistered", e);
+            }
+        });
+
+        mBgExecutor.execute(() -> {
+            try {
+                mContext.unregisterReceiver(mVideoReceiver);
+            } catch (IllegalArgumentException e) {
+                Log.e(TAG, "Video receiver already unregistered", e);
+            }
+        });
+
+        if (mRotationWatcherRegistered) {
+            try {
+                WindowManagerGlobal.getWindowManagerService().removeRotationWatcher(
+                        mRotationWatcher);
+            } catch (RemoteException e) {
+                Log.e(TAG, "UnregisterListeners caught a RemoteException", e);
+                return;
+            }
         }
 
+        TaskStackChangeListeners.getInstance().unregisterTaskStackListener(mTaskStackListener);
+    }
+
+    public void setRotationLockedAtAngle(int rotationSuggestion) {
+        final Boolean isLocked = isRotationLocked();
+        if (isLocked == null) {
+            // Ignore if we can't read the setting for the current user
+            return;
+        }
+        RotationPolicy.setRotationLockAtAngle(mContext, /* enabled= */ isLocked,
+                /* rotation= */ rotationSuggestion);
+    }
+
+    /**
+     * @return whether rotation is currently locked, or <code>null</code> if the setting couldn't
+     *         be read
+     */
+    public Boolean isRotationLocked() {
         try {
-            mMediaPlayer = new MediaPlayer();
-            // TODO: create SubtitleController in MediaPlayer, but we need
-            // a context for the subtitle renderers
-            final Context context = getContext();
-            final SubtitleController controller = new SubtitleController(
-                    context, mMediaPlayer.getMediaTimeProvider(), mMediaPlayer);
-            controller.registerRenderer(new WebVttRenderer(context));
-            controller.registerRenderer(new TtmlRenderer(context));
-            controller.registerRenderer(new Cea708CaptionRenderer(context));
-            controller.registerRenderer(new ClosedCaptionRenderer(context));
-            mMediaPlayer.setSubtitleAnchor(controller, this);
+            return RotationPolicy.isRotationLocked(mContext);
+        } catch (SecurityException e) {
+            // TODO(b/279561841): RotationPolicy uses the current user to resolve the setting which
+            //                    may change before the rotation watcher can be unregistered
+            Log.e(TAG, "Failed to get isRotationLocked", e);
+            return null;
+        }
+    }
 
-            if (mAudioSession != 0) {
-                mMediaPlayer.setAudioSessionId(mAudioSession);
-            } else {
-                mAudioSession = mMediaPlayer.getAudioSessionId();
+    public void setRotateSuggestionButtonState(boolean visible) {
+        setRotateSuggestionButtonState(visible, false /* force */);
+    }
+
+    void setRotateSuggestionButtonState(final boolean visible, final boolean force) {
+        // At any point the button can become invisible because an a11y service became active.
+        // Similarly, a call to make the button visible may be rejected because an a11y service is
+        // active. Must account for this.
+        // Rerun a show animation to indicate change but don't rerun a hide animation
+        if (!visible && !mRotationButton.isVisible()) return;
+
+        final View view = mRotationButton.getCurrentView();
+        if (view == null) return;
+
+        final Drawable currentDrawable = mRotationButton.getImageDrawable();
+        if (currentDrawable == null) return;
+
+        // Clear any pending suggestion flag as it has either been nullified or is being shown
+        mPendingRotationSuggestion = false;
+        mMainThreadHandler.removeCallbacks(mCancelPendingRotationProposal);
+
+        // Handle the visibility change and animation
+        if (visible) { // Appear and change (cannot force)
+            // Stop and clear any currently running hide animations
+            if (mRotateHideAnimator != null && mRotateHideAnimator.isRunning()) {
+                mRotateHideAnimator.cancel();
             }
-            mMediaPlayer.setOnPreparedListener(mPreparedListener);
-            mMediaPlayer.setOnVideoSizeChangedListener(mSizeChangedListener);
-            mMediaPlayer.setOnCompletionListener(mCompletionListener);
-            mMediaPlayer.setOnErrorListener(mErrorListener);
-            mMediaPlayer.setOnInfoListener(mInfoListener);
-            mMediaPlayer.setOnBufferingUpdateListener(mBufferingUpdateListener);
-            mCurrentBufferPercentage = 0;
-            mMediaPlayer.setDataSource(mContext, mUri, mHeaders);
-            mMediaPlayer.setDisplay(mSurfaceHolder);
-            mMediaPlayer.setAudioAttributes(mAudioAttributes);
-            mMediaPlayer.setScreenOnWhilePlaying(true);
-            mMediaPlayer.prepareAsync();
+            mRotateHideAnimator = null;
 
-            for (Pair<InputStream, MediaFormat> pending: mPendingSubtitleTracks) {
-                try {
-                    mMediaPlayer.addSubtitleSource(pending.first, pending.second);
-                } catch (IllegalStateException e) {
-                    mInfoListener.onInfo(
-                            mMediaPlayer, MediaPlayer.MEDIA_INFO_UNSUPPORTED_SUBTITLE, 0);
+            // Reset the alpha if any has changed due to hide animation
+            view.setAlpha(1f);
+
+            // Run the rotate icon's animation if it has one
+            if (currentDrawable instanceof AnimatedVectorDrawable) {
+                ((AnimatedVectorDrawable) currentDrawable).reset();
+                ((AnimatedVectorDrawable) currentDrawable).start();
+            }
+
+            // TODO(b/187754252): No idea why this doesn't work. If we remove the "false"
+            //  we see the animation show the pressed state... but it only shows the first time.
+            if (!isRotateSuggestionIntroduced()) mViewRippler.start(view);
+
+            // Set visibility unless a11y service is active.
+            mRotationButton.show();
+        } else { // Hide
+            mViewRippler.stop(); // Prevent any pending ripples, force hide or not
+
+            if (force) {
+                // If a hide animator is running stop it and make invisible
+                if (mRotateHideAnimator != null && mRotateHideAnimator.isRunning()) {
+                    mRotateHideAnimator.pause();
                 }
+                mRotationButton.hide();
+                return;
             }
 
-            // we don't set the target state here either, but preserve the
-            // target state that was there before.
-            mCurrentState = STATE_PREPARING;
-            attachMediaController();
-        } catch (IOException ex) {
-            Log.w(TAG, "Unable to open content: " + mUri, ex);
-            mCurrentState = STATE_ERROR;
-            mTargetState = STATE_ERROR;
-            mErrorListener.onError(mMediaPlayer, MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
-            return;
-        } catch (IllegalArgumentException ex) {
-            Log.w(TAG, "Unable to open content: " + mUri, ex);
-            mCurrentState = STATE_ERROR;
-            mTargetState = STATE_ERROR;
-            mErrorListener.onError(mMediaPlayer, MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
-            return;
-        } finally {
-            mPendingSubtitleTracks.clear();
-        }
-    }
+            // Don't start any new hide animations if one is running
+            if (mRotateHideAnimator != null && mRotateHideAnimator.isRunning()) return;
 
-    public void setMediaController(MediaController controller) {
-        if (mMediaController != null) {
-            mMediaController.hide();
-        }
-        mMediaController = controller;
-        attachMediaController();
-    }
-
-    private void attachMediaController() {
-        if (mMediaPlayer != null && mMediaController != null) {
-            mMediaController.setMediaPlayer(this);
-            View anchorView = this.getParent() instanceof View ?
-                    (View)this.getParent() : this;
-            mMediaController.setAnchorView(anchorView);
-            mMediaController.setEnabled(isInPlaybackState());
-        }
-    }
-
-    MediaPlayer.OnVideoSizeChangedListener mSizeChangedListener =
-        new MediaPlayer.OnVideoSizeChangedListener() {
-            public void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
-                mVideoWidth = mp.getVideoWidth();
-                mVideoHeight = mp.getVideoHeight();
-                if (mVideoWidth != 0 && mVideoHeight != 0) {
-                    getHolder().setFixedSize(mVideoWidth, mVideoHeight);
-                    requestLayout();
+            ObjectAnimator fadeOut = ObjectAnimator.ofFloat(view, "alpha", 0f);
+            fadeOut.setDuration(BUTTON_FADE_IN_OUT_DURATION_MS);
+            fadeOut.setInterpolator(LINEAR_INTERPOLATOR);
+            fadeOut.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    mRotationButton.hide();
                 }
-            }
-    };
+            });
 
-    @UnsupportedAppUsage
-    MediaPlayer.OnPreparedListener mPreparedListener = new MediaPlayer.OnPreparedListener() {
-        public void onPrepared(MediaPlayer mp) {
-            mCurrentState = STATE_PREPARED;
-
-            // Get the capabilities of the player for this stream
-            Metadata data = mp.getMetadata(MediaPlayer.METADATA_ALL,
-                                      MediaPlayer.BYPASS_METADATA_FILTER);
-
-            if (data != null) {
-                mCanPause = !data.has(Metadata.PAUSE_AVAILABLE)
-                        || data.getBoolean(Metadata.PAUSE_AVAILABLE);
-                mCanSeekBack = !data.has(Metadata.SEEK_BACKWARD_AVAILABLE)
-                        || data.getBoolean(Metadata.SEEK_BACKWARD_AVAILABLE);
-                mCanSeekForward = !data.has(Metadata.SEEK_FORWARD_AVAILABLE)
-                        || data.getBoolean(Metadata.SEEK_FORWARD_AVAILABLE);
-            } else {
-                mCanPause = mCanSeekBack = mCanSeekForward = true;
-            }
-
-            if (mOnPreparedListener != null) {
-                mOnPreparedListener.onPrepared(mMediaPlayer);
-            }
-            if (mMediaController != null) {
-                mMediaController.setEnabled(true);
-            }
-            mVideoWidth = mp.getVideoWidth();
-            mVideoHeight = mp.getVideoHeight();
-
-            int seekToPosition = mSeekWhenPrepared;  // mSeekWhenPrepared may be changed after seekTo() call
-            if (seekToPosition != 0) {
-                seekTo(seekToPosition);
-            }
-            if (mVideoWidth != 0 && mVideoHeight != 0) {
-                //Log.i("@@@@", "video size: " + mVideoWidth +"/"+ mVideoHeight);
-                getHolder().setFixedSize(mVideoWidth, mVideoHeight);
-                if (mSurfaceWidth == mVideoWidth && mSurfaceHeight == mVideoHeight) {
-                    // We didn't actually change the size (it was already at the size
-                    // we need), so we won't get a "surface changed" callback, so
-                    // start the video here instead of in the callback.
-                    if (mTargetState == STATE_PLAYING) {
-                        start();
-                        if (mMediaController != null) {
-                            mMediaController.show();
-                        }
-                    } else if (!isPlaying() &&
-                               (seekToPosition != 0 || getCurrentPosition() > 0)) {
-                       if (mMediaController != null) {
-                           // Show the media controls when we're paused into a video and make 'em stick.
-                           mMediaController.show(0);
-                       }
-                   }
-                }
-            } else {
-                // We don't know the video size yet, but should start anyway.
-                // The video size might be reported to us later.
-                if (mTargetState == STATE_PLAYING) {
-                    start();
-                }
-            }
-        }
-    };
-
-    private MediaPlayer.OnCompletionListener mCompletionListener =
-        new MediaPlayer.OnCompletionListener() {
-        public void onCompletion(MediaPlayer mp) {
-            mCurrentState = STATE_PLAYBACK_COMPLETED;
-            mTargetState = STATE_PLAYBACK_COMPLETED;
-            if (mMediaController != null) {
-                mMediaController.hide();
-            }
-            if (mOnCompletionListener != null) {
-                mOnCompletionListener.onCompletion(mMediaPlayer);
-            }
-            if (mAudioFocusType != AudioManager.AUDIOFOCUS_NONE) {
-                mAudioManager.abandonAudioFocus(null);
-            }
-        }
-    };
-
-    private MediaPlayer.OnInfoListener mInfoListener =
-        new MediaPlayer.OnInfoListener() {
-        public  boolean onInfo(MediaPlayer mp, int arg1, int arg2) {
-            if (mOnInfoListener != null) {
-                mOnInfoListener.onInfo(mp, arg1, arg2);
-            }
-            return true;
-        }
-    };
-
-    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
-    private MediaPlayer.OnErrorListener mErrorListener =
-        new MediaPlayer.OnErrorListener() {
-        public boolean onError(MediaPlayer mp, int framework_err, int impl_err) {
-            Log.d(TAG, "Error: " + framework_err + "," + impl_err);
-            mCurrentState = STATE_ERROR;
-            mTargetState = STATE_ERROR;
-            if (mMediaController != null) {
-                mMediaController.hide();
-            }
-
-            /* If an error handler has been supplied, use it and finish. */
-            if (mOnErrorListener != null) {
-                if (mOnErrorListener.onError(mMediaPlayer, framework_err, impl_err)) {
-                    return true;
-                }
-            }
-
-            /* Otherwise, pop up an error dialog so the user knows that
-             * something bad has happened. Only try and pop up the dialog
-             * if we're attached to a window. When we're going away and no
-             * longer have a window, don't bother showing the user an error.
-             */
-            if (getWindowToken() != null) {
-                Resources r = mContext.getResources();
-                int messageId;
-
-                if (framework_err == MediaPlayer.MEDIA_ERROR_NOT_VALID_FOR_PROGRESSIVE_PLAYBACK) {
-                    messageId = com.android.internal.R.string.VideoView_error_text_invalid_progressive_playback;
-                } else {
-                    messageId = com.android.internal.R.string.VideoView_error_text_unknown;
-                }
-
-                new AlertDialog.Builder(mContext)
-                        .setMessage(messageId)
-                        .setPositiveButton(com.android.internal.R.string.VideoView_error_button,
-                                new DialogInterface.OnClickListener() {
-                                    public void onClick(DialogInterface dialog, int whichButton) {
-                                        /* If we get here, there is no onError listener, so
-                                         * at least inform them that the video is over.
-                                         */
-                                        if (mOnCompletionListener != null) {
-                                            mOnCompletionListener.onCompletion(mMediaPlayer);
-                                        }
-                                    }
-                                })
-                        .setCancelable(false)
-                        .show();
-            }
-            return true;
-        }
-    };
-
-    private MediaPlayer.OnBufferingUpdateListener mBufferingUpdateListener =
-        new MediaPlayer.OnBufferingUpdateListener() {
-        public void onBufferingUpdate(MediaPlayer mp, int percent) {
-            mCurrentBufferPercentage = percent;
-        }
-    };
-
-    /**
-     * Register a callback to be invoked when the media file
-     * is loaded and ready to go.
-     *
-     * @param l The callback that will be run
-     */
-    public void setOnPreparedListener(MediaPlayer.OnPreparedListener l)
-    {
-        mOnPreparedListener = l;
-    }
-
-    /**
-     * Register a callback to be invoked when the end of a media file
-     * has been reached during playback.
-     *
-     * @param l The callback that will be run
-     */
-    public void setOnCompletionListener(OnCompletionListener l)
-    {
-        mOnCompletionListener = l;
-    }
-
-    /**
-     * Register a callback to be invoked when an error occurs
-     * during playback or setup.  If no listener is specified,
-     * or if the listener returned false, VideoView will inform
-     * the user of any errors.
-     *
-     * @param l The callback that will be run
-     */
-    public void setOnErrorListener(OnErrorListener l)
-    {
-        mOnErrorListener = l;
-    }
-
-    /**
-     * Register a callback to be invoked when an informational event
-     * occurs during playback or setup.
-     *
-     * @param l The callback that will be run
-     */
-    public void setOnInfoListener(OnInfoListener l) {
-        mOnInfoListener = l;
-    }
-
-    @UnsupportedAppUsage
-    SurfaceHolder.Callback mSHCallback = new SurfaceHolder.Callback()
-    {
-        public void surfaceChanged(SurfaceHolder holder, int format,
-                                    int w, int h)
-        {
-            mSurfaceWidth = w;
-            mSurfaceHeight = h;
-            boolean isValidState =  (mTargetState == STATE_PLAYING);
-            boolean hasValidSize = (mVideoWidth == w && mVideoHeight == h);
-            if (mMediaPlayer != null && isValidState && hasValidSize) {
-                if (mSeekWhenPrepared != 0) {
-                    seekTo(mSeekWhenPrepared);
-                }
-                start();
-            }
-        }
-
-        public void surfaceCreated(SurfaceHolder holder)
-        {
-            mSurfaceHolder = holder;
-            openVideo();
-        }
-
-        public void surfaceDestroyed(SurfaceHolder holder)
-        {
-            // after we return from this we can't use the surface any more
-            mSurfaceHolder = null;
-            if (mMediaController != null) mMediaController.hide();
-            release(true);
-        }
-    };
-
-    /*
-     * release the media player in any state
-     */
-    @UnsupportedAppUsage
-    private void release(boolean cleartargetstate) {
-        if (mMediaPlayer != null) {
-            mMediaPlayer.reset();
-            mMediaPlayer.release();
-            mMediaPlayer = null;
-            mPendingSubtitleTracks.clear();
-            mCurrentState = STATE_IDLE;
-            if (cleartargetstate) {
-                mTargetState  = STATE_IDLE;
-            }
-            if (mAudioFocusType != AudioManager.AUDIOFOCUS_NONE) {
-                mAudioManager.abandonAudioFocus(null);
-            }
+            mRotateHideAnimator = fadeOut;
+            fadeOut.start();
         }
     }
 
-    @Override
-    public boolean onTouchEvent(MotionEvent ev) {
-        if (ev.getAction() == MotionEvent.ACTION_DOWN
-                && isInPlaybackState() && mMediaController != null) {
-            toggleMediaControlsVisiblity();
-        }
-        return super.onTouchEvent(ev);
+    public void setDarkIntensity(float darkIntensity) {
+        mRotationButton.setDarkIntensity(darkIntensity);
     }
 
-    @Override
-    public boolean onTrackballEvent(MotionEvent ev) {
-        if (ev.getAction() == MotionEvent.ACTION_DOWN
-                && isInPlaybackState() && mMediaController != null) {
-            toggleMediaControlsVisiblity();
-        }
-        return super.onTrackballEvent(ev);
+    public void setRecentsAnimationRunning(boolean running) {
+        mIsRecentsAnimationRunning = running;
+        updateRotationButtonStateInOverview();
     }
 
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event)
-    {
-        boolean isKeyCodeSupported = keyCode != KeyEvent.KEYCODE_BACK &&
-                                     keyCode != KeyEvent.KEYCODE_VOLUME_UP &&
-                                     keyCode != KeyEvent.KEYCODE_VOLUME_DOWN &&
-                                     keyCode != KeyEvent.KEYCODE_VOLUME_MUTE &&
-                                     keyCode != KeyEvent.KEYCODE_MENU &&
-                                     keyCode != KeyEvent.KEYCODE_CALL &&
-                                     keyCode != KeyEvent.KEYCODE_ENDCALL;
-        if (isInPlaybackState() && isKeyCodeSupported && mMediaController != null) {
-            if (keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
-                    keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
-                if (mMediaPlayer.isPlaying()) {
-                    pause();
-                    mMediaController.show();
-                } else {
-                    start();
-                    mMediaController.hide();
-                }
-                return true;
-            } else if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) {
-                if (!mMediaPlayer.isPlaying()) {
-                    start();
-                    mMediaController.hide();
-                }
-                return true;
-            } else if (keyCode == KeyEvent.KEYCODE_MEDIA_STOP
-                    || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) {
-                if (mMediaPlayer.isPlaying()) {
-                    pause();
-                    mMediaController.show();
-                }
-                return true;
-            } else {
-                toggleMediaControlsVisiblity();
-            }
-        }
-
-        return super.onKeyDown(keyCode, event);
+    public void setHomeRotationEnabled(boolean enabled) {
+        mHomeRotationEnabled = enabled;
+        updateRotationButtonStateInOverview();
     }
 
-    private void toggleMediaControlsVisiblity() {
-        if (mMediaController.isShowing()) {
-            mMediaController.hide();
-        } else {
-            mMediaController.show();
-        }
-    }
-
-    @Override
-    public void start() {
-        if (isInPlaybackState()) {
-            mMediaPlayer.start();
-            mCurrentState = STATE_PLAYING;
-        }
-        mTargetState = STATE_PLAYING;
-        mContext.sendBroadcast(new Intent("ACTION_VIDEO_STARTED"));
-    }
-
-    @Override
-    public void pause() {
-        if (isInPlaybackState()) {
-            if (mMediaPlayer.isPlaying()) {
-                mMediaPlayer.pause();
-                mCurrentState = STATE_PAUSED;
-            }
-        }
-        mTargetState = STATE_PAUSED;
-        mContext.sendBroadcast(new Intent("ACTION_VIDEO_STOPPED"));
-    }
-
-    public void suspend() {
-        release(false);
-    }
-
-    public void resume() {
-        openVideo();
-    }
-
-    @Override
-    public int getDuration() {
-        if (isInPlaybackState()) {
-            return mMediaPlayer.getDuration();
-        }
-
-        return -1;
-    }
-
-    @Override
-    public int getCurrentPosition() {
-        if (isInPlaybackState()) {
-            return mMediaPlayer.getCurrentPosition();
-        }
-        return 0;
-    }
-
-    @Override
-    public void seekTo(int msec) {
-        if (isInPlaybackState()) {
-            mMediaPlayer.seekTo(msec);
-            mSeekWhenPrepared = 0;
-        } else {
-            mSeekWhenPrepared = msec;
-        }
-    }
-
-    @Override
-    public boolean isPlaying() {
-        return isInPlaybackState() && mMediaPlayer.isPlaying();
-    }
-
-    @Override
-    public int getBufferPercentage() {
-        if (mMediaPlayer != null) {
-            return mCurrentBufferPercentage;
-        }
-        return 0;
-    }
-
-    private boolean isInPlaybackState() {
-        return (mMediaPlayer != null &&
-                mCurrentState != STATE_ERROR &&
-                mCurrentState != STATE_IDLE &&
-                mCurrentState != STATE_PREPARING);
-    }
-
-    @Override
-    public boolean canPause() {
-        return mCanPause;
-    }
-
-    @Override
-    public boolean canSeekBackward() {
-        return mCanSeekBack;
-    }
-
-    @Override
-    public boolean canSeekForward() {
-        return mCanSeekForward;
-    }
-
-    @Override
-    public int getAudioSessionId() {
-        if (mAudioSession == 0) {
-            MediaPlayer foo = new MediaPlayer();
-            mAudioSession = foo.getAudioSessionId();
-            foo.release();
-        }
-        return mAudioSession;
-    }
-
-    @Override
-    protected void onAttachedToWindow() {
-        super.onAttachedToWindow();
-
-        if (mSubtitleWidget != null) {
-            mSubtitleWidget.onAttachedToWindow();
-        }
-    }
-
-    @Override
-    protected void onDetachedFromWindow() {
-        super.onDetachedFromWindow();
-
-        if (mSubtitleWidget != null) {
-            mSubtitleWidget.onDetachedFromWindow();
-        }
-    }
-
-    @Override
-    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
-        super.onLayout(changed, left, top, right, bottom);
-
-        if (mSubtitleWidget != null) {
-            measureAndLayoutSubtitleWidget();
-        }
-    }
-
-    @Override
-    public void draw(Canvas canvas) {
-        super.draw(canvas);
-
-        if (mSubtitleWidget != null) {
-            final int saveCount = canvas.save();
-            canvas.translate(getPaddingLeft(), getPaddingTop());
-            mSubtitleWidget.draw(canvas);
-            canvas.restoreToCount(saveCount);
-        }
-    }
-
-    /**
-     * Forces a measurement and layout pass for all overlaid views.
-     *
-     * @see #setSubtitleWidget(RenderingWidget)
-     */
-    private void measureAndLayoutSubtitleWidget() {
-        final int width = getWidth() - getPaddingLeft() - getPaddingRight();
-        final int height = getHeight() - getPaddingTop() - getPaddingBottom();
-
-        mSubtitleWidget.setSize(width, height);
-    }
-
-    /** @hide */
-    @Override
-    public void setSubtitleWidget(RenderingWidget subtitleWidget) {
-        if (mSubtitleWidget == subtitleWidget) {
+    private void updateDockedState(Intent intent) {
+        if (intent == null) {
             return;
         }
 
-        final boolean attachedToWindow = isAttachedToWindow();
-        if (mSubtitleWidget != null) {
-            if (attachedToWindow) {
-                mSubtitleWidget.onDetachedFromWindow();
-            }
-
-            mSubtitleWidget.setOnChangedListener(null);
-        }
-
-        mSubtitleWidget = subtitleWidget;
-
-        if (subtitleWidget != null) {
-            if (mSubtitlesChangedListener == null) {
-                mSubtitlesChangedListener = new RenderingWidget.OnChangedListener() {
-                    @Override
-                    public void onChanged(RenderingWidget renderingWidget) {
-                        invalidate();
-                    }
-                };
-            }
-
-            setWillNotDraw(false);
-            subtitleWidget.setOnChangedListener(mSubtitlesChangedListener);
-
-            if (attachedToWindow) {
-                subtitleWidget.onAttachedToWindow();
-                requestLayout();
-            }
-        } else {
-            setWillNotDraw(true);
-        }
-
-        invalidate();
+        mDocked = intent.getIntExtra(Intent.EXTRA_DOCK_STATE, Intent.EXTRA_DOCK_STATE_UNDOCKED)
+                != Intent.EXTRA_DOCK_STATE_UNDOCKED;
     }
 
-    /** @hide */
-    @Override
-    public Looper getSubtitleLooper() {
-        return Looper.getMainLooper();
+    private void updateVideoState(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+
+        String action = intent.getAction();
+        if (action.equals("ACTION_VIDEO_STARTED")) {
+            mVideoPlaying = true;
+        } else if (action.equals("ACTION_VIDEO_STOPPED")) {
+            mVideoPlaying = false;
+        }
+
+        Log.d(TAG, "devtitans-debug updateVideoState() action=" + action);
+    }
+
+    private void updateRotationButtonStateInOverview() {
+        if (mIsRecentsAnimationRunning && !mHomeRotationEnabled) {
+            setRotateSuggestionButtonState(false, true /* hideImmediately */);
+        }
+    }
+
+    public void onRotationProposal(int rotation, boolean isValid) {
+        boolean isUserSetupComplete = Settings.Secure.getInt(mContext.getContentResolver(),
+                Settings.Secure.USER_SETUP_COMPLETE, 0) != 0;
+        if (!isUserSetupComplete && OEM_DISALLOW_ROTATION_IN_SUW) {
+            return;
+        }
+
+        int windowRotation = mWindowRotationProvider.get();
+
+        if (!mRotationButton.acceptRotationProposal()) {
+            return;
+        }
+
+        if (!mHomeRotationEnabled && mIsRecentsAnimationRunning) {
+            return;
+        }
+
+        // This method will be called on rotation suggestion changes even if the proposed rotation
+        // is not valid for the top app. Use invalid rotation choices as a signal to remove the
+        // rotate button if shown.
+        if (!isValid) {
+            setRotateSuggestionButtonState(false /* visible */);
+            return;
+        }
+
+        // If window rotation matches suggested rotation, remove any current suggestions
+        if (rotation == windowRotation) {
+            mMainThreadHandler.removeCallbacks(mRemoveRotationProposal);
+            setRotateSuggestionButtonState(false /* visible */);
+            return;
+        }
+
+        // Prepare to show the navbar icon by updating the icon style to change anim params
+        Log.i(TAG, "onRotationProposal(rotation=" + rotation + ")");
+        mLastRotationSuggestion = rotation; // Remember rotation for click
+
+        if (mVideoPlaying) {
+            setRotationLockedAtAngle(rotation);
+            return;
+        }
+
+        final boolean rotationCCW = Utilities.isRotationAnimationCCW(windowRotation, rotation);
+        if (windowRotation == Surface.ROTATION_0 || windowRotation == Surface.ROTATION_180) {
+            mIconResId = rotationCCW ? mIconCcwStart0ResId : mIconCwStart0ResId;
+        } else { // 90 or 270
+            mIconResId = rotationCCW ? mIconCcwStart90ResId : mIconCwStart90ResId;
+        }
+        mRotationButton.updateIcon(mLightIconColor, mDarkIconColor);
+
+        if (canShowRotationButton()) {
+            // The navbar is visible / it's in visual immersive mode, so show the icon right away
+            showAndLogRotationSuggestion();
+        } else {
+            // If the navbar isn't shown, flag the rotate icon to be shown should the navbar become
+            // visible given some time limit.
+            mPendingRotationSuggestion = true;
+            mMainThreadHandler.removeCallbacks(mCancelPendingRotationProposal);
+            mMainThreadHandler.postDelayed(mCancelPendingRotationProposal,
+                    NAVBAR_HIDDEN_PENDING_ICON_TIMEOUT_MS);
+        }
+    }
+
+    /**
+     * Called when the rotation watcher rotation changes, either from the watcher registered
+     * internally in this class, or a signal propagated from NavBarHelper.
+     */
+    public void onRotationWatcherChanged(int rotation) {
+        if (!mListenersRegistered) {
+            // Ignore if not registered
+            return;
+        }
+
+        // If the screen rotation changes while locked, potentially update lock to flow with
+        // new screen rotation and hide any showing suggestions.
+        Boolean rotationLocked = isRotationLocked();
+        if (rotationLocked == null) {
+            // Ignore if we can't read the setting for the current user
+            return;
+        }
+        // The isVisible check makes the rotation button disappear when we are not locked
+        // (e.g. for tabletop auto-rotate).
+        if (rotationLocked || mRotationButton.isVisible()) {
+            // Do not allow a change in rotation to set user rotation when docked.
+            if (shouldOverrideUserLockPrefs(rotation) && rotationLocked && !mDocked) {
+                setRotationLockedAtAngle(rotation);
+            }
+            setRotateSuggestionButtonState(false /* visible */, true /* forced */);
+        }
+    }
+
+    public void onDisable2FlagChanged(int state2) {
+        final boolean rotateSuggestionsDisabled = hasDisable2RotateSuggestionFlag(state2);
+        if (rotateSuggestionsDisabled) onRotationSuggestionsDisabled();
+    }
+
+    public void onNavigationModeChanged(int mode) {
+        mNavBarMode = mode;
+    }
+
+    public void onBehaviorChanged(int displayId, @WindowInsetsController.Behavior int behavior) {
+        if (DEFAULT_DISPLAY != displayId) {
+            return;
+        }
+
+        if (mBehavior != behavior) {
+            mBehavior = behavior;
+            showPendingRotationButtonIfNeeded();
+        }
+    }
+
+    public void onNavigationBarWindowVisibilityChange(boolean showing) {
+        if (mIsNavigationBarShowing != showing) {
+            mIsNavigationBarShowing = showing;
+            showPendingRotationButtonIfNeeded();
+        }
+    }
+
+    public void onTaskbarStateChange(boolean visible, boolean stashed) {
+        mTaskBarVisible = visible;
+        if (getRotationButton() == null) {
+            return;
+        }
+        getRotationButton().onTaskbarStateChanged(visible, stashed);
+    }
+
+    private void showPendingRotationButtonIfNeeded() {
+        if (canShowRotationButton() && mPendingRotationSuggestion) {
+            showAndLogRotationSuggestion();
+        }
+    }
+
+    /**
+     * Return true when either the task bar is visible or it's in visual immersive mode.
+     */
+    @SuppressLint("InlinedApi")
+    @VisibleForTesting
+    boolean canShowRotationButton() {
+        return mIsNavigationBarShowing
+            || mBehavior == WindowInsetsController.BEHAVIOR_DEFAULT
+            || isGesturalMode(mNavBarMode);
+    }
+
+    @DrawableRes
+    public int getIconResId() {
+        return mIconResId;
+    }
+
+    @ColorInt
+    public int getLightIconColor() {
+        return mLightIconColor;
+    }
+
+    @ColorInt
+    public int getDarkIconColor() {
+        return mDarkIconColor;
+    }
+
+    public void dumpLogs(String prefix, PrintWriter pw) {
+        pw.println(prefix + "RotationButtonController:");
+
+        pw.println(String.format(
+                "%s\tmIsRecentsAnimationRunning=%b", prefix, mIsRecentsAnimationRunning));
+        pw.println(String.format("%s\tmHomeRotationEnabled=%b", prefix, mHomeRotationEnabled));
+        pw.println(String.format(
+                "%s\tmLastRotationSuggestion=%d", prefix, mLastRotationSuggestion));
+        pw.println(String.format(
+                "%s\tmPendingRotationSuggestion=%b", prefix, mPendingRotationSuggestion));
+        pw.println(String.format(
+                "%s\tmHoveringRotationSuggestion=%b", prefix, mHoveringRotationSuggestion));
+        pw.println(String.format("%s\tmListenersRegistered=%b", prefix, mListenersRegistered));
+        pw.println(String.format(
+                "%s\tmIsNavigationBarShowing=%b", prefix, mIsNavigationBarShowing));
+        pw.println(String.format("%s\tmBehavior=%d", prefix, mBehavior));
+        pw.println(String.format(
+                "%s\tmSkipOverrideUserLockPrefsOnce=%b", prefix, mSkipOverrideUserLockPrefsOnce));
+        pw.println(String.format(
+                "%s\tmLightIconColor=0x%s", prefix, Integer.toHexString(mLightIconColor)));
+        pw.println(String.format(
+                "%s\tmDarkIconColor=0x%s", prefix, Integer.toHexString(mDarkIconColor)));
+    }
+
+    public RotationButton getRotationButton() {
+        return mRotationButton;
+    }
+
+    private void onRotateSuggestionClick(View v) {
+        mUiEventLogger.log(RotationButtonEvent.ROTATION_SUGGESTION_ACCEPTED);
+        incrementNumAcceptedRotationSuggestionsIfNeeded();
+        setRotationLockedAtAngle(mLastRotationSuggestion);
+        Log.i(TAG, "onRotateSuggestionClick() mLastRotationSuggestion=" + mLastRotationSuggestion);
+        v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+    }
+
+    private boolean onRotateSuggestionHover(View v, MotionEvent event) {
+        final int action = event.getActionMasked();
+        mHoveringRotationSuggestion = (action == MotionEvent.ACTION_HOVER_ENTER)
+                || (action == MotionEvent.ACTION_HOVER_MOVE);
+        rescheduleRotationTimeout(true /* reasonHover */);
+        return false; // Must return false so a11y hover events are dispatched correctly.
+    }
+
+    private void onRotationSuggestionsDisabled() {
+        // Immediately hide the rotate button and clear any planned removal
+        setRotateSuggestionButtonState(false /* visible */, true /* force */);
+        mMainThreadHandler.removeCallbacks(mRemoveRotationProposal);
+    }
+
+    private void showAndLogRotationSuggestion() {
+        setRotateSuggestionButtonState(true /* visible */);
+        rescheduleRotationTimeout(false /* reasonHover */);
+        mUiEventLogger.log(RotationButtonEvent.ROTATION_SUGGESTION_SHOWN);
+    }
+
+    /**
+     * Makes {@link #shouldOverrideUserLockPrefs} always return {@code false} once. It is used to
+     * avoid losing original user rotation when display rotation is changed by entering the fixed
+     * orientation overview.
+     */
+    public void setSkipOverrideUserLockPrefsOnce() {
+        // If live-tile is enabled (recents animation keeps running in overview), there is no
+        // activity switch so the display rotation is not changed, then it is no need to skip.
+        mSkipOverrideUserLockPrefsOnce = !mIsRecentsAnimationRunning;
+    }
+
+    private boolean shouldOverrideUserLockPrefs(final int rotation) {
+        if (mSkipOverrideUserLockPrefsOnce) {
+            mSkipOverrideUserLockPrefsOnce = false;
+            return false;
+        }
+        // Only override user prefs when returning to the natural rotation (normally portrait).
+        // Don't let apps that force landscape or 180 alter user lock.
+        return rotation == NATURAL_ROTATION;
+    }
+
+    private void rescheduleRotationTimeout(final boolean reasonHover) {
+        // May be called due to a new rotation proposal or a change in hover state
+        if (reasonHover) {
+            // Don't reschedule if a hide animator is running
+            if (mRotateHideAnimator != null && mRotateHideAnimator.isRunning()) return;
+            // Don't reschedule if not visible
+            if (!mRotationButton.isVisible()) return;
+        }
+
+        // Stop any pending removal
+        mMainThreadHandler.removeCallbacks(mRemoveRotationProposal);
+        // Schedule timeout
+        mMainThreadHandler.postDelayed(mRemoveRotationProposal,
+                computeRotationProposalTimeout());
+    }
+
+    private int computeRotationProposalTimeout() {
+        return mAccessibilityManager.getRecommendedTimeoutMillis(
+                mHoveringRotationSuggestion ? 16000 : 5000,
+                AccessibilityManager.FLAG_CONTENT_CONTROLS);
+    }
+
+    private boolean isRotateSuggestionIntroduced() {
+        ContentResolver cr = mContext.getContentResolver();
+        return Settings.Secure.getInt(cr, Settings.Secure.NUM_ROTATION_SUGGESTIONS_ACCEPTED, 0)
+                >= NUM_ACCEPTED_ROTATION_SUGGESTIONS_FOR_INTRODUCTION;
+    }
+
+    private void incrementNumAcceptedRotationSuggestionsIfNeeded() {
+        // Get the number of accepted suggestions
+        ContentResolver cr = mContext.getContentResolver();
+        final int numSuggestions = Settings.Secure.getInt(cr,
+                Settings.Secure.NUM_ROTATION_SUGGESTIONS_ACCEPTED, 0);
+
+        // Increment the number of accepted suggestions only if it would change intro mode
+        if (numSuggestions < NUM_ACCEPTED_ROTATION_SUGGESTIONS_FOR_INTRODUCTION) {
+            Settings.Secure.putInt(cr, Settings.Secure.NUM_ROTATION_SUGGESTIONS_ACCEPTED,
+                    numSuggestions + 1);
+        }
+    }
+
+    private class TaskStackListenerImpl implements TaskStackChangeListener {
+        // Invalidate any rotation suggestion on task change or activity orientation change
+        // Note: all callbacks happen on main thread
+
+        @Override
+        public void onTaskStackChanged() {
+            setRotateSuggestionButtonState(false /* visible */);
+        }
+
+        @Override
+        public void onTaskRemoved(int taskId) {
+            setRotateSuggestionButtonState(false /* visible */);
+        }
+
+        @Override
+        public void onTaskMovedToFront(int taskId) {
+            setRotateSuggestionButtonState(false /* visible */);
+        }
+
+        @Override
+        public void onActivityRequestedOrientationChanged(int taskId, int requestedOrientation) {
+            // Only hide the icon if the top task changes its requestedOrientation
+            // Launcher can alter its requestedOrientation while it's not on top, don't hide on this
+            Optional.ofNullable(ActivityManagerWrapper.getInstance())
+                    .map(ActivityManagerWrapper::getRunningTask)
+                    .ifPresent(a -> {
+                        if (a.id == taskId) setRotateSuggestionButtonState(false /* visible */);
+                    });
+        }
+    }
+
+    enum RotationButtonEvent implements UiEventLogger.UiEventEnum {
+        @UiEvent(doc = "The rotation button was shown")
+        ROTATION_SUGGESTION_SHOWN(206),
+        @UiEvent(doc = "The rotation button was clicked")
+        ROTATION_SUGGESTION_ACCEPTED(207);
+
+        private final int mId;
+
+        RotationButtonEvent(int id) {
+            mId = id;
+        }
+
+        @Override
+        public int getId() {
+            return mId;
+        }
     }
 }
