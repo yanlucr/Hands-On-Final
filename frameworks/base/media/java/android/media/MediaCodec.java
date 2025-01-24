@@ -59,13 +59,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import javax.imageio.ImageReader;
-import javax.sound.sampled.AudioFormat;
-import javax.sound.sampled.AudioSystem;
-
-import org.jcp.xml.dsig.internal.dom.Utils;
-
-
 /**
  MediaCodec class can be used to access low-level media codecs, i.e. encoder/decoder components.
  It is part of the Android low-level multimedia support infrastructure (normally used together
