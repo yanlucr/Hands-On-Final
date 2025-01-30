@@ -32,6 +32,8 @@ import android.app.blob.BlobStoreManagerFrameworkInitializer;
 import android.app.contentsuggestions.ContentSuggestionsManager;
 import android.app.contentsuggestions.IContentSuggestionsManager;
 import android.app.job.JobSchedulerFrameworkInitializer;
+import android.app.devtitans.DevTitansServiceManager;
+import android.app.devtitans.IDevTitansServiceManager;
 import android.app.people.PeopleManager;
 import android.app.prediction.AppPredictionManager;
 import android.app.role.RoleFrameworkInitializer;
@@ -1567,15 +1569,19 @@ public final class SystemServiceRegistry {
                     }
                 });
 
-        registerService(Context.DEVTITANS_VIDEO_SERVICE, DevTitansVideoServiceManager.class,
-                new CachedServiceFetcher<DevTitansVideoServiceManager>() {
-                    @Override
-                    public DevTitansVideoServiceManager createService(ContextImpl ctx) {
-                        IBinder binder = ServiceManager.getService(Context.DEVTITANS_VIDEO_SERVICE);
-                        IDevTitansVideoService service = IDevTitansVideoService.Stub.asInterface(binder);
-                        return new DevTitansVideoServiceManager(ctx, service);
+        registerService(Context.DEVTITANS_SERVICE, DevTitansServiceManager.class,
+            new CachedServiceFetcher < DevTitansServiceManager > () {
+                @Override
+                public DevTitansServiceManager createService(ContextImpl context) throws ServiceNotFoundException {
+                    IBinder binder;
+                    if (true) { 
+                        binder = ServiceManager.getServiceOrThrow(Context.DEVTITANS_SERVICE);
+                    } else {
+                        binder = ServiceManager.getService(Context.DEVTITANS_SERVICE);
                     }
-                })
+                    return new DevTitansServiceManager(context, IDevTitansServiceManager.Stub.asInterface(binder));
+                }
+        });
 
         sInitializing = true;
         try {

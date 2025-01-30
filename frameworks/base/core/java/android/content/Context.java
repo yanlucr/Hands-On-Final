@@ -6431,7 +6431,7 @@ public abstract class Context {
     @SystemApi
     public static final String SHARED_CONNECTIVITY_SERVICE = "shared_connectivity";
 
-    public static final String DEVTITANS_VIDEO_SERVICE = "devtitans_video";
+    public static final String DEVTITANS_SERVICE = "devtitans";
 
     /**
      * Determine whether the given permission is allowed for a particular

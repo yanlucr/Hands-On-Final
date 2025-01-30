@@ -30,6 +30,7 @@ import android.annotation.ColorInt;
 import android.annotation.DrawableRes;
 import android.annotation.SuppressLint;
 import android.app.StatusBarManager;
+import android.app.devtitans.DevTitansServiceManager;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -101,6 +102,7 @@ public class RotationButtonController {
     private boolean mPendingRotationSuggestion;
     private boolean mHoveringRotationSuggestion;
     private final AccessibilityManager mAccessibilityManager;
+    private final DevTitansServiceManager mVideoManager;
     private final TaskStackListenerImpl mTaskStackListener;
 
     private boolean mListenersRegistered = false;
@@ -111,7 +113,6 @@ public class RotationButtonController {
     int mBehavior = WindowInsetsController.BEHAVIOR_DEFAULT;
     private int mNavBarMode;
     private boolean mTaskBarVisible = false;
-    private boolean mVideoPlaying = false;
     private boolean mSkipOverrideUserLockPrefsOnce;
     private final int mLightIconColor;
     private final int mDarkIconColor;
@@ -140,13 +141,6 @@ public class RotationButtonController {
         @Override
         public void onReceive(Context context, Intent intent) {
             updateDockedState(intent);
-        }
-    };
-
-    private final BroadcastReceiver mVideoReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            updateVideoState(intent);
         }
     };
 
@@ -190,6 +184,7 @@ public class RotationButtonController {
         mIconResId = mIconCcwStart90ResId;
 
         mAccessibilityManager = AccessibilityManager.getInstance(context);
+        mVideoManager = (DevTitansServiceManager) context.getSystemService(Context.DEVTITANS_SERVICE);
         mTaskStackListener = new TaskStackListenerImpl();
         mWindowRotationProvider = windowRotationProvider;
 
@@ -245,14 +240,6 @@ public class RotationButtonController {
             mContext.getMainExecutor().execute(() -> updateDockedState(intent));
         });
 
-        mBgExecutor.execute(() -> {
-            IntentFilter filter = new IntentFilter();
-            filter.addAction("ACTION_VIDEO_STARTED");
-            filter.addAction("ACTION_VIDEO_STOPPED");
-            final Intent intent = mContext.registerReceiver(mVideoReceiver, filter, Context.RECEIVER_EXPORTED);
-            mContext.getMainExecutor().execute(() -> updateVideoState(intent));
-        });
-
         if (registerRotationWatcher) {
             try {
                 WindowManagerGlobal.getWindowManagerService()
@@ -282,14 +269,6 @@ public class RotationButtonController {
                 mContext.unregisterReceiver(mDockedReceiver);
             } catch (IllegalArgumentException e) {
                 Log.e(TAG, "Docked receiver already unregistered", e);
-            }
-        });
-
-        mBgExecutor.execute(() -> {
-            try {
-                mContext.unregisterReceiver(mVideoReceiver);
-            } catch (IllegalArgumentException e) {
-                Log.e(TAG, "Video receiver already unregistered", e);
             }
         });
 
@@ -428,19 +407,6 @@ public class RotationButtonController {
                 != Intent.EXTRA_DOCK_STATE_UNDOCKED;
     }
 
-    private void updateVideoState(Intent intent) {
-        if (intent == null) {
-            return;
-        }
-
-        String action = intent.getAction();
-        if (action.equals("ACTION_VIDEO_STARTED")) {
-            mVideoPlaying = true;
-        } else if (action.equals("ACTION_VIDEO_STOPPED")) {
-            mVideoPlaying = false;
-        }
-    }
-
     private void updateRotationButtonStateInOverview() {
         if (mIsRecentsAnimationRunning && !mHomeRotationEnabled) {
             setRotateSuggestionButtonState(false, true /* hideImmediately */);
@@ -483,8 +449,8 @@ public class RotationButtonController {
         Log.i(TAG, "onRotationProposal(rotation=" + rotation + ")");
         mLastRotationSuggestion = rotation; // Remember rotation for click
 
-        Log.i(TAG, "onRotationProposal() mVideoPlaying=" + mVideoPlaying);
-        if (mVideoPlaying) {
+        Log.d(TAG, "devtitans-debug isVideoPlaying=" + mVideoManager.isVideoPlaying());
+        if (mVideoManager.isVideoPlaying()) {
             setRotationLockedAtAngle(rotation);
             return;
         }

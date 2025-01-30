@@ -18,10 +18,10 @@ package android.widget;
 
 import android.annotation.NonNull;
 import android.app.AlertDialog;
+import android.app.devtitans.DevTitansServiceManager;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.content.Intent;
 import android.content.res.Resources;
 import android.graphics.Canvas;
 import android.media.AudioAttributes;
@@ -138,6 +138,7 @@ public class VideoView extends SurfaceView
     private boolean mCanSeekBack;
     private boolean mCanSeekForward;
     private AudioManager mAudioManager;
+    private DevTitansServiceManager mVideoManager;
     private int mAudioFocusType = AudioManager.AUDIOFOCUS_GAIN; // legacy focus gain
     private AudioAttributes mAudioAttributes;
 
@@ -168,6 +169,8 @@ public class VideoView extends SurfaceView
         mAudioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
         mAudioAttributes = new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build();
+
+        mVideoManager = (DevTitansServiceManager) context.getSystemService(Context.DEVTITANS_SERVICE);
 
         getHolder().addCallback(mSHCallback);
         getHolder().setType(SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS);
@@ -798,9 +801,8 @@ public class VideoView extends SurfaceView
             mMediaPlayer.start();
             mCurrentState = STATE_PLAYING;
         }
-        Log.d(TAG, "devtitans-debug VideoView video playing");
         mTargetState = STATE_PLAYING;
-        mContext.sendBroadcast(new Intent("ACTION_VIDEO_STARTED"));
+        mVideoManager.setVideoPlaying(true);
     }
 
     @Override
@@ -811,9 +813,8 @@ public class VideoView extends SurfaceView
                 mCurrentState = STATE_PAUSED;
             }
         }
-        Log.d(TAG, "devtitans-debug VideoView video stopped");
         mTargetState = STATE_PAUSED;
-        mContext.sendBroadcast(new Intent("ACTION_VIDEO_STOPPED"));
+        mVideoManager.setVideoPlaying(false);
     }
 
     public void suspend() {

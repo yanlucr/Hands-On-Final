@@ -147,6 +147,7 @@ import com.android.server.locales.LocaleManagerService;
 import com.android.server.location.LocationManagerService;
 import com.android.server.location.altitude.AltitudeService;
 import com.android.server.logcat.LogcatManagerService;
+import com.android.server.devtitans.DevTitansService;
 import com.android.server.media.MediaRouterService;
 import com.android.server.media.metrics.MediaMetricsManagerService;
 import com.android.server.media.projection.MediaProjectionManagerService;
@@ -2501,14 +2502,6 @@ public final class SystemServer implements Dumpable {
             }
             t.traceEnd();
 
-            t.traceBegin("StartDevTitansVideoService");
-            try {
-                ServiceManager.addService(Context.DEVTITANS_VIDEO_SERVICE, new DevTitansVideoService());
-            } catch (Throwable e) {
-                reportWtf("starting DevTitansVideoService", e);
-            }
-            t.traceEnd();
-
             final boolean hasFeatureFace
                     = mPackageManager.hasSystemFeature(PackageManager.FEATURE_FACE);
             final boolean hasFeatureIris
@@ -3094,6 +3087,14 @@ public final class SystemServer implements Dumpable {
                         });
             } catch (Throwable e) {
                 reportWtf("starting Tethering", e);
+            }
+            t.traceEnd();
+
+            t.traceBegin("DevTitansService");
+            try {
+                ServiceManager.addService(Context.DEVTITANS_SERVICE, new DevTitansService(context));
+            } catch (Throwable e) {
+                reportWtf("starting DevTitansService", e);
             }
             t.traceEnd();
 
