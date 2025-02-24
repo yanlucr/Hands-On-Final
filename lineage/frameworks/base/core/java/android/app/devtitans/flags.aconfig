@@ -1,0 +1,8 @@
+package: "android.app.devtitans"
+
+flag {
+    name: "devtitans_service"
+    namespace: "devtitans"
+    description: "This flag controls a devtitans service"
+    bug: "<none>"
+}
