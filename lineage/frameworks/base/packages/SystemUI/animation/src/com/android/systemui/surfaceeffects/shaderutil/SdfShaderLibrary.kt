@@ -118,9 +118,10 @@ class SdfShaderLibrary {
 
         const val BORDER_SDF = 
             """
-            float sdRoundedRect(vec2 p, vec2 size, float r) {
-                // size here represents half-size (i.e. the extents from center)
-                vec2 d = abs(p) - size + vec2(r);
+            const float pi2 = 1.57079632679;
+
+            float sdRoundedRect(vec2 p, vec2 halfSize, float r) {
+                vec2 d = abs(p) - halfSize + vec2(r);
                 float outside = length(max(d, vec2(0.0)));
                 float inside = min(max(d.x, d.y), 0.0);
                 return outside + inside - r;

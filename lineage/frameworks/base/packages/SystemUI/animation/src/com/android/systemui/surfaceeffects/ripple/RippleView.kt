@@ -264,6 +264,7 @@
          } else if (rippleShape == RippleShape.BORDER) {
             //Para o BORDER_SHADER não aplicamos máscara,
             // pois o shader já renderiza a borda animada.
+
             canvas.drawPaint(ripplePaint)
          }
          else { // RippleShape.RoundedBox

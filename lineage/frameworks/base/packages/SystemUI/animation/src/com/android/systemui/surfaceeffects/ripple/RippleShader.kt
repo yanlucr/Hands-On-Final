@@ -142,102 +142,74 @@ class RippleShader(shaderShape: RippleShape = RippleShape.CIRCLE) :
                 return mix(ripple, vec4(sparkle), sparkle * in_sparkle_strength);
             }
         """
+
+
         private const val SHADER_BORDER_MAIN =
-            """
-            
-            const float pi2 = 1.5708;
+        """
+            vec4 main(vec2 p) {
+            float r = in_thickness;
+            float w = in_size.x;
+            float h = in_size.y;
 
-            // Função SDF (se precisar dela para a máscara interna)
-            float sdRoundedRect(vec2 p, vec2 halfSize, float r) {
-                // 'halfSize' representa as semi-extensões do retângulo centrado em (0,0).
-                // Logo, p deve estar em um referencial cujo (0,0) é o centro do retângulo.
-                // Exemplo: p - c, onde c é o centro da tela, se você quiser a forma centralizada.
-                vec2 d = abs(p) - halfSize + vec2(r);
-                float outside = length(max(d, vec2(0.0)));
-                float inside = min(max(d.x, d.y), 0.0);
-                return outside + inside - r;
+            // Perimeter calculation
+            float topLen = w - 2.0 * r;
+            float sideLen = h - 2.0 * r;
+            float arcLen = pi2 * r;
+            float totalP = 2.0 * (topLen + sideLen) + 4.0 * arcLen;
+            float animatedLength = in_battery * totalP;
+
+            // Position along the border (t)
+            float t = -1.0;
+            if (p.y < r && p.x >= r && p.x <= w - r) {
+                t = p.x - r;
+            } else if (p.x > w - r && p.y < r) {
+                float dx = p.x - (w - r);
+                float dy = r - p.y;
+                float angle = acos(clamp(dy / r, -1.0, 1.0));
+                t = topLen + angle * r;
+            } else if (p.x > w - r && p.y >= r && p.y <= h - r) {
+                t = topLen + arcLen + (p.y - r);
+            } else if (p.x > w - r && p.y > h - r) {
+                float dx = (w - r) - p.x;
+                float dy = p.y - (h - r);
+                float angle = acos(clamp(dx / r, -1.0, 1.0));
+                t = topLen + arcLen + sideLen + angle * r;
+            } else if (p.y > h - r && p.x >= r && p.x <= w - r) {
+                t = topLen + arcLen + sideLen + arcLen + ((w - r) - p.x);
+            } else if (p.x < r && p.y > h - r) {
+                float dx = r - p.x;
+                float dy = p.y - (h - r);
+                float angle = acos(clamp(dx / r, -1.0, 1.0));
+                t = topLen + arcLen + sideLen + arcLen + topLen + angle * r;
+            } else if (p.x < r && p.y >= r && p.y <= h - r) {
+                t = topLen + arcLen + sideLen + arcLen + topLen + arcLen + ((h - r) - p.y);
+            } else if (p.x < r && p.y < r) {
+                float dx = r - p.x;
+                float dy = r - p.y;
+                float angle = acos(clamp(dy / r, -1.0, 1.0));
+                t = totalP - ((pi2 - angle) * r);
             }
 
-            vec4 main(vec2 p)
-            {
-                // Removemos p += in_center * 0.0; => p agora reflete o canto superior esquerdo.
+            // Fill logic
+            float fill = (t < 0.0) ? 0.0 : step(t, animatedLength * clamp(in_time * 0.00175, 0.0, 1.0)); //in_time normalized for animation
 
-                // Variáveis de tamanho
-                float r = in_thickness;
-                float w = in_size.x;
-                float h = in_size.y;
+            // Color
+            vec3 borderColor = mix(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), in_battery);
 
-                // Cálculo do perímetro (topLen, sideLen, etc.) permanece igual.
-                float topLen = w - 2.0 * r;      
-                float sideLen = h - 2.0 * r;     
-                float arcLen = pi2 * r;          
-                float totalP = 2.0 * (topLen + sideLen) + 4.0 * arcLen;
+            // Border mask using SDF
+            vec2 center = vec2(w * 0.5, h * 0.5);
+            float outerDist = sdRoundedRect(p - center, vec2(w * 0.5, h * 0.5), r);
+            float innerDist = sdRoundedRect(p - center, vec2(w * 0.5 - r, h * 0.5 - r), r);
+            float borderDist = abs(outerDist) - r; // Distância da borda
+            float borderMask = 1.0 - soften(borderDist, in_blur); // 1 na borda, 0 cc
 
-                float animatedLength = in_battery * totalP;
+            // Final alpha
+            float alpha = fill * borderMask * in_color.a;
 
-                // Cálculo da posição "t" (0 até totalP) ao longo da borda.
-                // Aqui, p = (0,0) no canto sup. esquerdo e (w,h) no canto inf. direito.
-                float t = -1.0;
-                if (p.y < r && p.x >= r && p.x <= w - r) {
-                    t = p.x - r;
-                } else if (p.x > w - r && p.y < r) {
-                    float dx = p.x - (w - r);
-                    float dy = r - p.y;
-                    float angle = acos(clamp(dy / r, 0.0, 1.0));
-                    t = topLen + angle * r;
-                } else if (p.x > w - r && p.y >= r && p.y <= h - r) {
-                    t = topLen + arcLen + (p.y - r);
-                } else if (p.x > w - r && p.y > h - r) {
-                    float dx = (w - r) - p.x;
-                    float dy = p.y - (h - r);
-                    float angle = acos(clamp(dx / r, 0.0, 1.0));
-                    t = topLen + arcLen + sideLen + angle * r;
-                } else if (p.y > h - r && p.x >= r && p.x <= w - r) {
-                    t = topLen + arcLen + sideLen + arcLen + ((w - r) - p.x);
-                } else if (p.x < r && p.y > h - r) {
-                    float dx = r - p.x;
-                    float dy = p.y - (h - r);
-                    float angle = acos(clamp(dx / r, 0.0, 1.0));
-                    t = topLen + arcLen + sideLen + arcLen + topLen + angle * r;
-                } else if (p.x < r && p.y >= r && p.y <= h - r) {
-                    t = topLen + arcLen + sideLen + arcLen + topLen + arcLen + ((h - r) - p.y);
-                } else if (p.x < r && p.y < r) {
-                    float dx = r - p.x;
-                    float dy = r - p.y;
-                    float angle = acos(clamp(dy / r, 0.0, 1.0));
-                    t = totalP - ((pi2 - angle) * r);
-                }
-
-                // fill = 1.0 se t estiver dentro do comprimento animado; 0.0 caso contrário.
-                float fill = (t < 0.0) ? 0.0 : step(t, animatedLength);
-
-                // Cor interpolada entre vermelho (0%) e verde (100%) de acordo com in_battery.
-                vec3 borderColor = mix(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), in_battery);
-
-                // Anti-aliasing:
-                // Aqui, definimos que a "borda ideal" é [r, w-r] e [r, h-r]. Vamos medir distância.
-                // dVec mede quanto p está fora desse retângulo interno.
-                vec2 dVec = abs(p - vec2(w*0.5, h*0.5)) - vec2(w*0.5 - r, h*0.5 - r);
-                float aa = 1.0 - smoothstep(0.0, r,
-                    length(max(dVec, vec2(0.0))) + min(max(dVec.x, dVec.y), 0.0)
-                );
-
-                // Máscara interna (opcional):
-                // Se quiser limpar o interior, podemos usar sdRoundedRect:
-                // Precisamos que (0,0) seja o centro do retângulo => subtraímos (w/2, h/2).
-                // halfSize = (w/2 - r, h/2 - r).
-                float innerDist = sdRoundedRect(
-                    p - vec2(w*0.5, h*0.5),     // desloca p para o centro
-                    vec2(w*0.5 - r, h*0.5 - r), // half-size do retângulo interno
-                    r                           // raio
-                );
-                // Se innerDist < 0 => p está dentro do retângulo. 
-                // smoothstep(0,1,innerDist) => 0 dentro, 1 fora.
-                float innerMask = smoothstep(0.0, 1.0, innerDist);
-
-                return vec4(borderColor, fill * aa * innerMask);
-            }
-            """
+            return vec4(borderColor * alpha, alpha);
+}
+        
+        """
 
         private const val CIRCLE_SHADER =
             SHADER_UNIFORMS +
